@@ -1,0 +1,2 @@
+# Alpaca Trading Analytics Dependencies
+requests>=2.28.0
