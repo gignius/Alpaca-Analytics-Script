@@ -58,9 +58,12 @@ ALPACA_SECRET_KEY = "{secret_key}"
 # Trading Environment
 USE_PAPER_TRADING = {use_paper}
 
-# Optional: Additional settings
-DEFAULT_ANALYSIS_PERIOD = "1M"
-MAX_ORDERS_TO_DISPLAY = 50
+# Analysis Configuration
+DEFAULT_ANALYSIS_PERIODS = ["1M", "3M", "1Y", "1W", "1D"]
+MAX_ORDERS_TO_FETCH = 100
+ANALYSIS_START_DATE = None  # Or "2024-04-11" for specific start date
+
+# API Configuration
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0
 
@@ -68,6 +71,11 @@ RETRY_DELAY = 1.0
 CURRENCY_SYMBOL = "$"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
 PRECISION_DECIMAL_PLACES = 2
+
+# Chart Generation Settings
+CHART_DPI = 300  # High resolution for professional output
+CHART_STYLE = "seaborn-v0_8"  # Professional styling
+AUTO_OPEN_CHARTS = True  # Automatically open generated charts
 '''
     
     try:
@@ -89,21 +97,73 @@ PRECISION_DECIMAL_PLACES = 2
                 print("📝 Added config.py to .gitignore for security")
         
         print("\n🚀 Setup complete! You can now run:")
-        print("   python alpaca.py")
+        print("   python alpaca.py                    # Full analysis with charts")
+        print("   python alpaca.py --test-charts      # Test chart generation")
+        print("\n📊 Features available:")
+        print("   • Comprehensive performance analytics")
+        print("   • Professional chart generation")
+        print("   • Risk-adjusted metrics")
+        print("   • Trade analysis and statistics")
+        print("   • High-resolution PNG output")
         
     except Exception as e:
         print(f"❌ Error creating config file: {e}")
 
+def install_dependencies():
+    """Install required dependencies."""
+    import subprocess
+    
+    print("📦 Installing dependencies...")
+    
+    try:
+        # Install core dependencies
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        print("✅ All dependencies installed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install dependencies: {e}")
+        print("💡 Try running manually: pip install -r requirements.txt")
+        return False
+
 def check_dependencies():
     """Check if required dependencies are installed."""
+    missing_deps = []
+    
+    # Core dependencies
     try:
         import requests
-        print("✅ Dependencies satisfied")
-        return True
     except ImportError:
-        print("❌ Missing dependencies. Please run:")
-        print("   pip install -r requirements.txt")
-        return False
+        missing_deps.append("requests")
+    
+    # Chart generation dependencies
+    try:
+        import matplotlib
+        import seaborn
+        import pandas
+        import numpy
+        import scipy
+        print("✅ All dependencies satisfied (including chart generation)")
+        charts_available = True
+    except ImportError as e:
+        print(f"⚠️  Chart dependencies missing: {e}")
+        print("📊 Charts will not be available without these packages")
+        charts_available = False
+    
+    if missing_deps:
+        print(f"❌ Missing core dependencies: {', '.join(missing_deps)}")
+        response = input("📦 Install missing dependencies now? (y/n): ")
+        if response.lower() in ['y', 'yes']:
+            return install_dependencies()
+        else:
+            print("⚠️  Some features may not work without dependencies")
+            return False
+    
+    if not charts_available:
+        response = input("📊 Install chart generation dependencies? (y/n): ")
+        if response.lower() in ['y', 'yes']:
+            return install_dependencies()
+    
+    return True
 
 def main():
     """Main setup function."""
