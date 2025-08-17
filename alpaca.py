@@ -11,16 +11,42 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import sys
+import os
+import subprocess
+import platform
+
+# Chart generation imports
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import seaborn as sns
+    import pandas as pd
+    import numpy as np
+    from scipy import stats
+    CHARTS_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  Chart dependencies not available: {e}")
+    print("📦 Install with: pip install matplotlib seaborn pandas numpy scipy")
+    CHARTS_AVAILABLE = False
 
 # Alpaca API Configuration
-# For security, replace these with your actual API keys or use environment variables
-ALPACA_API_KEY = "YOUR_API_KEY_HERE"
-ALPACA_SECRET_KEY = "YOUR_SECRET_KEY_HERE"
-
-# Alternative: Use environment variables (recommended for production)
-# import os
-# ALPACA_API_KEY = os.getenv('ALPACA_API_KEY', 'YOUR_API_KEY_HERE')
-# ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY', 'YOUR_SECRET_KEY_HERE')
+# Try to import from secure config file first, then fall back to environment variables
+try:
+    from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, DEFAULT_ANALYSIS_PERIODS, MAX_ORDERS_TO_FETCH, ANALYSIS_START_DATE
+    print("🔑 Using configuration from config.py")
+except ImportError:
+    # Fallback to environment variables and defaults
+    ALPACA_API_KEY = os.getenv('ALPACA_API_KEY', 'YOUR_API_KEY_HERE')
+    ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY', 'YOUR_SECRET_KEY_HERE')
+    DEFAULT_ANALYSIS_PERIODS = ["1M", "3M", "1Y", "1W", "1D"]
+    MAX_ORDERS_TO_FETCH = 100
+    ANALYSIS_START_DATE = None
+    if ALPACA_API_KEY == 'YOUR_API_KEY_HERE':
+        print("⚠️  No API keys found. Please:")
+        print("   1. Edit config.py with your Alpaca API keys, OR")
+        print("   2. Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables")
 
 # Try both paper and live endpoints
 ENDPOINTS = [
@@ -148,31 +174,59 @@ def get_portfolio_history_from_date(start_date: str = "2024-04-11") -> Optional[
 
 def get_extended_portfolio_history() -> Optional[Dict]:
     """Get extended portfolio history for better analysis."""
-    # First try to get data from April 11th
-    april_data = get_portfolio_history_from_date("2024-04-11")
-    if april_data:
-        return april_data
+    print("🔍 Attempting to fetch full portfolio history...")
     
-    # If that fails, try different periods until we find one that works
-    periods = ["1M", "3M", "6M", "1Y"]
+    # Try to get maximum available history with different approaches
+    strategies = [
+        # Strategy 1: Try maximum periods first
+        {"periods": ["1Y", "6M", "3M", "1M"], "description": "Maximum period"},
+        
+        # Strategy 2: Try date-based fetching from account creation
+        {"dates": ["2024-01-01", "2024-04-01", "2024-07-01"], "description": "Date-based"},
+        
+        # Strategy 3: Try all available periods
+        {"periods": ["2Y", "1Y", "6M", "3M", "1M", "1W"], "description": "All periods"}
+    ]
     
-    for period in periods:
-        try:
-            params = {"period": period}
-            response = requests.get(f"{BASE_URL}/v2/account/portfolio/history", headers=HEADERS, params=params)
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 422:
-                # Try shorter period
-                continue
-            else:
-                response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            if period == periods[-1]:  # Last attempt
-                print(f"Error fetching extended portfolio history: {e}")
-                return None
-            continue
+    for strategy in strategies:
+        if "periods" in strategy:
+            print(f"🔍 Trying {strategy['description']} approach...")
+            for period in strategy["periods"]:
+                try:
+                    print(f"  📅 Attempting {period} period...")
+                    params = {"period": period}
+                    response = requests.get(f"{BASE_URL}/v2/account/portfolio/history", headers=HEADERS, params=params)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        equity_data = data.get('equity', [])
+                        if equity_data and len(equity_data) > 1:
+                            print(f"✅ Success! Got {len(equity_data)} data points from {period} period")
+                            return data
+                    elif response.status_code == 422:
+                        print(f"  ❌ {period} not available")
+                        continue
+                    else:
+                        print(f"  ❌ Error {response.status_code} for {period}")
+                        
+                except requests.exceptions.RequestException as e:
+                    print(f"  ❌ Request failed for {period}: {e}")
+                    continue
+        
+        elif "dates" in strategy:
+            print(f"🔍 Trying {strategy['description']} approach...")
+            for start_date in strategy["dates"]:
+                try:
+                    print(f"  📅 Attempting from {start_date}...")
+                    data = get_portfolio_history_from_date(start_date)
+                    if data and data.get('equity') and len(data.get('equity', [])) > 1:
+                        print(f"✅ Success! Got {len(data.get('equity', []))} data points from {start_date}")
+                        return data
+                except Exception as e:
+                    print(f"  ❌ Failed for {start_date}: {e}")
+                    continue
     
+    print("⚠️ Could not fetch extended history, will use basic data")
     return None
 
 
@@ -217,14 +271,21 @@ def get_closed_orders_from_date(start_date: str = "2024-04-11") -> Optional[List
 def get_closed_orders() -> Optional[List[Dict]]:
     """Get all closed/filled orders for trade analysis."""
     try:
+        # Alpaca API limit is 500 per request, so we'll fetch maximum
         params = {
             "status": "closed",
-            "limit": 500,  # Get more orders for better analysis
+            "limit": 500,  # Maximum allowed by API
             "direction": "desc"
         }
         response = requests.get(f"{BASE_URL}/v2/orders", headers=HEADERS, params=params)
         response.raise_for_status()
-        return response.json()
+        
+        orders = response.json()
+        print(f"📋 Fetched {len(orders)} closed orders (API limit: 500)")
+        
+        # Note: For accounts with >500 orders, would need pagination
+        # This gets the 500 most recent closed orders
+        return orders
     except requests.exceptions.RequestException as e:
         print(f"Error fetching closed orders: {e}")
         return None
@@ -561,6 +622,627 @@ class PerformanceCalculator:
         }
 
 
+class ChartGenerator:
+    """Generate comprehensive trading analytics charts."""
+    
+    def __init__(self, calculator: PerformanceCalculator):
+        self.calculator = calculator
+        self.charts_dir = "charts"
+        self.setup_style()
+        self.ensure_charts_directory()
+    
+    def setup_style(self):
+        """Setup matplotlib and seaborn styling."""
+        if not CHARTS_AVAILABLE:
+            return
+        
+        # Set style
+        plt.style.use('seaborn-v0_8' if hasattr(plt.style, 'use') else 'default')
+        sns.set_palette("husl")
+        
+        # Configure matplotlib
+        plt.rcParams['figure.figsize'] = (12, 8)
+        plt.rcParams['font.size'] = 10
+        plt.rcParams['axes.grid'] = True
+        plt.rcParams['grid.alpha'] = 0.3
+    
+    def ensure_charts_directory(self):
+        """Create charts directory if it doesn't exist."""
+        if not os.path.exists(self.charts_dir):
+            os.makedirs(self.charts_dir)
+    
+    def open_file_in_explorer(self, filepath: str):
+        """Open file in default application or explorer."""
+        try:
+            system = platform.system().lower()
+            abs_path = os.path.abspath(filepath)
+            
+            if system == "windows":
+                # Use os.startfile for Windows
+                os.startfile(abs_path)
+            elif system == "darwin":  # macOS
+                subprocess.run(["open", abs_path], check=False)
+            else:  # Linux and others
+                subprocess.run(["xdg-open", abs_path], check=False)
+                
+            print(f"📁 Chart opened: {abs_path}")
+        except Exception as e:
+            print(f"⚠️ Could not open file automatically: {e}")
+            print(f"📁 Chart saved to: {os.path.abspath(filepath)}")
+    
+    def create_equity_curve_chart(self, save_and_open: bool = True) -> Optional[str]:
+        """Create equity curve chart with key metrics annotations."""
+        if not CHARTS_AVAILABLE or not self.calculator.equity_values:
+            print("⚠️ Cannot create equity curve chart - no data or dependencies missing")
+            return None
+        
+        try:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[3, 1])
+            
+            # Prepare data
+            dates = self.calculator.dates
+            equity = self.calculator.equity_values
+            
+            if not dates or len(dates) != len(equity):
+                dates = list(range(len(equity)))
+        
+            # Main equity curve
+            ax1.plot(dates, equity, linewidth=2, color='#2E86AB', label='Portfolio Value')
+            ax1.fill_between(dates, equity, alpha=0.3, color='#2E86AB')
+            
+            # Add peak and trough annotations
+            peak_idx = np.argmax(equity)
+            trough_idx = np.argmin(equity)
+            
+            ax1.scatter(dates[peak_idx], equity[peak_idx], color='green', s=100, zorder=5)
+            ax1.annotate(f'Peak: ${equity[peak_idx]:,.0f}', 
+                        xy=(dates[peak_idx], equity[peak_idx]),
+                        xytext=(10, 10), textcoords='offset points',
+                        bbox=dict(boxstyle='round,pad=0.3', fc='lightgreen', alpha=0.7),
+                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+            
+            ax1.scatter(dates[trough_idx], equity[trough_idx], color='red', s=100, zorder=5)
+            ax1.annotate(f'Trough: ${equity[trough_idx]:,.0f}', 
+                        xy=(dates[trough_idx], equity[trough_idx]),
+                        xytext=(10, -20), textcoords='offset points',
+                        bbox=dict(boxstyle='round,pad=0.3', fc='lightcoral', alpha=0.7),
+                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+            
+            # Format axes
+            ax1.set_title('Portfolio Equity Curve', fontsize=16, fontweight='bold')
+            ax1.set_ylabel('Portfolio Value ($)', fontsize=12)
+            ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # Returns subplot
+            returns = self.calculator.calculate_returns()
+            if returns and len(returns) == len(dates) - 1:
+                returns_dates = dates[1:]
+                ax2.bar(returns_dates, [r * 100 for r in returns], 
+                       color=['green' if r > 0 else 'red' for r in returns], 
+                       alpha=0.7, width=1.0)
+            
+            ax2.set_title('Daily Returns (%)', fontsize=12)
+            ax2.set_ylabel('Return (%)', fontsize=10)
+            ax2.set_xlabel('Time Period', fontsize=10)
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            ax2.grid(True, alpha=0.3)
+            
+            # Format x-axis if we have actual dates
+            if isinstance(dates[0], datetime):
+                for ax in [ax1, ax2]:
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            plt.tight_layout()
+        
+            if save_and_open:
+                filename = f"{self.charts_dir}/equity_curve.png"
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                print(f"📈 Equity curve chart saved: {filename}")
+                self.open_file_in_explorer(filename)
+                return filename
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error creating equity curve chart: {e}")
+            plt.close('all')
+            return None
+    
+    def create_drawdown_chart(self, save_and_open: bool = True) -> Optional[str]:
+        """Create underwater (drawdown) chart."""
+        if not CHARTS_AVAILABLE or not self.calculator.equity_values:
+            print("⚠️ Cannot create drawdown chart - no data or dependencies missing")
+            return None
+        
+        try:
+            fig, ax = plt.subplots(figsize=(14, 8))
+            
+            # Calculate drawdown
+            equity = self.calculator.equity_values
+            dates = self.calculator.dates
+            
+            if not dates or len(dates) != len(equity):
+                dates = list(range(len(equity)))
+            
+            peak = equity[0]
+            drawdowns = []
+            
+            for value in equity:
+                if value > peak:
+                    peak = value
+                drawdown = (value - peak) / peak * 100
+                drawdowns.append(drawdown)
+        
+            # Create underwater chart
+            ax.fill_between(dates, drawdowns, 0, color='red', alpha=0.3, label='Drawdown')
+            ax.plot(dates, drawdowns, color='darkred', linewidth=2)
+            
+            # Add maximum drawdown annotation
+            max_dd_idx = np.argmin(drawdowns)
+            max_dd_value = drawdowns[max_dd_idx]
+            
+            ax.scatter(dates[max_dd_idx], max_dd_value, color='red', s=150, zorder=5)
+            ax.annotate(f'Max DD: {max_dd_value:.1f}%', 
+                       xy=(dates[max_dd_idx], max_dd_value),
+                       xytext=(10, 10), textcoords='offset points',
+                       bbox=dict(boxstyle='round,pad=0.3', fc='lightcoral', alpha=0.8),
+                       arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+            
+            ax.set_title('Portfolio Drawdown (Underwater Chart)', fontsize=16, fontweight='bold')
+            ax.set_ylabel('Drawdown (%)', fontsize=12)
+            ax.set_xlabel('Time Period', fontsize=12)
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Format x-axis if we have actual dates
+            if isinstance(dates[0], datetime):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            plt.tight_layout()
+            
+            if save_and_open:
+                filename = f"{self.charts_dir}/drawdown_chart.png"
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                print(f"📉 Drawdown chart saved: {filename}")
+                self.open_file_in_explorer(filename)
+                return filename
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error creating drawdown chart: {e}")
+            plt.close('all')
+            return None
+    
+    def create_returns_analysis_chart(self, save_and_open: bool = True) -> Optional[str]:
+        """Create returns distribution and rolling metrics chart."""
+        if not CHARTS_AVAILABLE:
+            print("⚠️ Cannot create returns analysis chart - dependencies missing")
+            return None
+        
+        returns = self.calculator.calculate_returns()
+        if not returns:
+            print("⚠️ Cannot create returns analysis chart - no returns data")
+            return None
+        
+        try:
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+            
+            # Returns distribution histogram
+            ax1.hist(returns, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+            ax1.axvline(np.mean(returns), color='red', linestyle='--', linewidth=2, label=f'Mean: {np.mean(returns):.4f}')
+            ax1.axvline(np.median(returns), color='green', linestyle='--', linewidth=2, label=f'Median: {np.median(returns):.4f}')
+            ax1.set_title('Daily Returns Distribution', fontsize=14, fontweight='bold')
+            ax1.set_xlabel('Daily Return')
+            ax1.set_ylabel('Frequency')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+        
+            # Q-Q plot for normality check
+            try:
+                stats.probplot(returns, dist="norm", plot=ax2)
+                ax2.set_title('Q-Q Plot (Normality Check)', fontsize=14, fontweight='bold')
+                ax2.grid(True, alpha=0.3)
+            except Exception as e:
+                print(f"⚠️ Could not create Q-Q plot: {e}")
+                ax2.text(0.5, 0.5, 'Q-Q Plot\nNot Available', ha='center', va='center', 
+                        transform=ax2.transAxes, fontsize=12)
+                ax2.set_title('Q-Q Plot (Normality Check)', fontsize=14, fontweight='bold')
+            
+            # Rolling Sharpe ratio
+            if len(returns) > 30:
+                rolling_window = min(30, len(returns) // 3)
+                rolling_returns = pd.Series(returns)
+                rolling_sharpe = rolling_returns.rolling(rolling_window).mean() / rolling_returns.rolling(rolling_window).std() * np.sqrt(252)
+                
+                ax3.plot(rolling_sharpe.index, rolling_sharpe.values, linewidth=2, color='purple')
+                ax3.axhline(y=1, color='red', linestyle='--', alpha=0.7, label='Sharpe = 1')
+                ax3.axhline(y=2, color='green', linestyle='--', alpha=0.7, label='Sharpe = 2')
+                ax3.set_title(f'Rolling Sharpe Ratio ({rolling_window}-day)', fontsize=14, fontweight='bold')
+                ax3.set_ylabel('Sharpe Ratio')
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
+            
+            # Rolling volatility
+            if len(returns) > 30:
+                rolling_vol = rolling_returns.rolling(rolling_window).std() * np.sqrt(252) * 100
+                ax4.plot(rolling_vol.index, rolling_vol.values, linewidth=2, color='orange')
+                ax4.set_title(f'Rolling Volatility ({rolling_window}-day)', fontsize=14, fontweight='bold')
+                ax4.set_ylabel('Annualized Volatility (%)')
+                ax4.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            if save_and_open:
+                filename = f"{self.charts_dir}/returns_analysis.png"
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                print(f"📊 Returns analysis chart saved: {filename}")
+                self.open_file_in_explorer(filename)
+                return filename
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error creating returns analysis chart: {e}")
+            plt.close('all')
+            return None
+    
+    def create_trade_analysis_chart(self, save_and_open: bool = True) -> Optional[str]:
+        """Create trade P&L analysis charts."""
+        if not CHARTS_AVAILABLE:
+            return None
+        
+        trade_analysis = self.calculator.analyze_trades()
+        if trade_analysis['total_trades'] == 0:
+            return None
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # Trade P&L scatter plot
+        trade_pnls = trade_analysis.get('trade_pnls', [])
+        if trade_pnls:
+            trade_numbers = list(range(1, len(trade_pnls) + 1))
+            colors = ['green' if pnl > 0 else 'red' for pnl in trade_pnls]
+            
+            ax1.scatter(trade_numbers, trade_pnls, c=colors, alpha=0.7, s=50)
+            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+            ax1.set_title('Individual Trade P&L', fontsize=14, fontweight='bold')
+            ax1.set_xlabel('Trade Number')
+            ax1.set_ylabel('P&L ($)')
+            ax1.grid(True, alpha=0.3)
+            
+            # Cumulative P&L
+            cumulative_pnl = np.cumsum(trade_pnls)
+            ax2.plot(trade_numbers, cumulative_pnl, linewidth=2, color='blue')
+            ax2.fill_between(trade_numbers, cumulative_pnl, alpha=0.3, color='blue')
+            ax2.set_title('Cumulative Trade P&L', fontsize=14, fontweight='bold')
+            ax2.set_xlabel('Trade Number')
+            ax2.set_ylabel('Cumulative P&L ($)')
+            ax2.grid(True, alpha=0.3)
+        
+        # Win/Loss distribution pie chart
+        win_count = trade_analysis['winning_trades']
+        loss_count = trade_analysis['losing_trades']
+        
+        if win_count > 0 or loss_count > 0:
+            labels = ['Winning Trades', 'Losing Trades']
+            sizes = [win_count, loss_count]
+            colors = ['lightgreen', 'lightcoral']
+            explode = (0.05, 0.05)
+            
+            ax3.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%',
+                   shadow=True, startangle=90)
+            ax3.set_title(f'Win/Loss Ratio\n(Win Rate: {trade_analysis["win_rate"]:.1f}%)', 
+                         fontsize=14, fontweight='bold')
+        
+        # Performance metrics bar chart
+        metrics = {
+            'Win Rate (%)': trade_analysis['win_rate'],
+            'Profit Factor': trade_analysis['profit_factor'],
+            'Avg Win ($)': trade_analysis['avg_win'],
+            'Avg Loss ($)': abs(trade_analysis['avg_loss'])
+        }
+        
+        metric_names = list(metrics.keys())
+        metric_values = list(metrics.values())
+        
+        bars = ax4.bar(metric_names, metric_values, color=['green', 'blue', 'lightgreen', 'lightcoral'])
+        ax4.set_title('Key Trading Metrics', fontsize=14, fontweight='bold')
+        ax4.set_ylabel('Value')
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, metric_values):
+            height = bar.get_height()
+            ax4.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                    f'{value:.2f}', ha='center', va='bottom')
+        
+        plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_and_open:
+            filename = f"{self.charts_dir}/trade_analysis.png"
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"💰 Trade analysis chart saved: {filename}")
+            self.open_file_in_explorer(filename)
+            return filename
+        
+        return None
+    
+    def create_risk_metrics_dashboard(self, save_and_open: bool = True) -> Optional[str]:
+        """Create comprehensive risk metrics dashboard."""
+        if not CHARTS_AVAILABLE:
+            return None
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # Risk metrics gauge charts
+        sharpe = self.calculator.calculate_sharpe_ratio()
+        sortino = self.calculator.calculate_sortino_ratio()
+        max_dd, _, _ = self.calculator.calculate_max_drawdown()
+        volatility = self.calculator.calculate_volatility()
+        
+        # Sharpe ratio gauge
+        self._create_gauge_chart(ax1, sharpe, "Sharpe Ratio", 
+                               thresholds=[0, 1, 2, 3], 
+                               colors=['red', 'yellow', 'lightgreen', 'green'])
+        
+        # Sortino ratio gauge
+        self._create_gauge_chart(ax2, sortino, "Sortino Ratio", 
+                               thresholds=[0, 1, 2, 3], 
+                               colors=['red', 'yellow', 'lightgreen', 'green'])
+        
+        # Maximum drawdown gauge
+        self._create_gauge_chart(ax3, max_dd, "Max Drawdown (%)", 
+                               thresholds=[0, 5, 10, 20], 
+                               colors=['green', 'lightgreen', 'yellow', 'red'],
+                               reverse=True)
+        
+        # Volatility gauge
+        self._create_gauge_chart(ax4, volatility, "Volatility (%)", 
+                               thresholds=[0, 10, 20, 40], 
+                               colors=['green', 'lightgreen', 'yellow', 'red'],
+                               reverse=True)
+        
+        plt.suptitle('Risk Metrics Dashboard', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        
+        if save_and_open:
+            filename = f"{self.charts_dir}/risk_dashboard.png"
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"⚠️ Risk dashboard saved: {filename}")
+            self.open_file_in_explorer(filename)
+            return filename
+        
+        return None
+    
+    def _create_gauge_chart(self, ax, value, title, thresholds, colors, reverse=False):
+        """Create a gauge chart for risk metrics."""
+        # Determine color based on value and thresholds
+        if reverse:
+            color_idx = 0
+            for i, threshold in enumerate(thresholds[1:], 1):
+                if value >= threshold:
+                    color_idx = i
+        else:
+            color_idx = len(colors) - 1
+            for i, threshold in enumerate(thresholds[1:], 1):
+                if value < threshold:
+                    color_idx = i - 1
+                    break
+        
+        color = colors[min(color_idx, len(colors) - 1)]
+        
+        # Create bar chart as gauge
+        ax.bar(0, value, color=color, alpha=0.7, width=0.5)
+        ax.set_title(f'{title}\n{value:.2f}', fontsize=12, fontweight='bold')
+        ax.set_xlim(-0.5, 0.5)
+        ax.set_xticks([])
+        
+        # Add threshold lines
+        for threshold in thresholds[1:]:
+            ax.axhline(y=threshold, color='black', linestyle='--', alpha=0.5)
+    
+    def create_performance_summary_dashboard(self, save_and_open: bool = True) -> Optional[str]:
+        """Create comprehensive performance summary dashboard."""
+        if not CHARTS_AVAILABLE:
+            return None
+        
+        fig = plt.figure(figsize=(20, 14))
+        
+        # Create grid layout
+        gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
+        
+        # Main equity curve (top row, spans 3 columns)
+        ax_equity = fig.add_subplot(gs[0, :3])
+        dates = self.calculator.dates
+        equity = self.calculator.equity_values
+        
+        if not dates or len(dates) != len(equity):
+            dates = list(range(len(equity)))
+        
+        ax_equity.plot(dates, equity, linewidth=3, color='#2E86AB')
+        ax_equity.fill_between(dates, equity, alpha=0.3, color='#2E86AB')
+        ax_equity.set_title('Portfolio Performance Overview', fontsize=16, fontweight='bold')
+        ax_equity.set_ylabel('Portfolio Value ($)')
+        ax_equity.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+        ax_equity.grid(True, alpha=0.3)
+        
+        # Key metrics panel (top right)
+        ax_metrics = fig.add_subplot(gs[0, 3])
+        ax_metrics.axis('off')
+        
+        total_return = self.calculator.total_return()
+        cagr = self.calculator.annualized_return()
+        sharpe = self.calculator.calculate_sharpe_ratio()
+        max_dd, _, _ = self.calculator.calculate_max_drawdown()
+        
+        metrics_text = f"""
+KEY METRICS
+
+Total Return: {total_return:+.1f}%
+CAGR: {cagr:+.1f}%
+Sharpe Ratio: {sharpe:.2f}
+Max Drawdown: {max_dd:.1f}%
+
+Portfolio Value:
+${equity[-1] if equity else 0:,.0f}
+        """
+        
+        ax_metrics.text(0.1, 0.9, metrics_text, transform=ax_metrics.transAxes,
+                       fontsize=12, verticalalignment='top',
+                       bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
+        
+        # Drawdown chart (middle left)
+        ax_dd = fig.add_subplot(gs[1, :2])
+        peak = equity[0] if equity else 0
+        drawdowns = []
+        for value in equity:
+            if value > peak:
+                peak = value
+            drawdown = (value - peak) / peak * 100 if peak > 0 else 0
+            drawdowns.append(drawdown)
+        
+        ax_dd.fill_between(dates, drawdowns, 0, color='red', alpha=0.3)
+        ax_dd.plot(dates, drawdowns, color='darkred', linewidth=2)
+        ax_dd.set_title('Drawdown Analysis', fontsize=14, fontweight='bold')
+        ax_dd.set_ylabel('Drawdown (%)')
+        ax_dd.grid(True, alpha=0.3)
+        
+        # Returns distribution (middle right)
+        ax_returns = fig.add_subplot(gs[1, 2:])
+        returns = self.calculator.calculate_returns()
+        if returns:
+            ax_returns.hist(returns, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+            ax_returns.axvline(np.mean(returns), color='red', linestyle='--', linewidth=2)
+            ax_returns.set_title('Daily Returns Distribution', fontsize=14, fontweight='bold')
+            ax_returns.set_xlabel('Daily Return')
+            ax_returns.set_ylabel('Frequency')
+            ax_returns.grid(True, alpha=0.3)
+        
+        # Trade analysis (bottom left)
+        trade_analysis = self.calculator.analyze_trades()
+        if trade_analysis['total_trades'] > 0:
+            ax_trades = fig.add_subplot(gs[2, :2])
+            
+            win_count = trade_analysis['winning_trades']
+            loss_count = trade_analysis['losing_trades']
+            
+            if win_count > 0 or loss_count > 0:
+                labels = ['Wins', 'Losses']
+                sizes = [win_count, loss_count]
+                colors = ['lightgreen', 'lightcoral']
+                
+                ax_trades.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%',
+                             startangle=90)
+                ax_trades.set_title(f'Trade Analysis\nWin Rate: {trade_analysis["win_rate"]:.1f}%', 
+                                   fontsize=14, fontweight='bold')
+        
+        # Risk metrics summary (bottom right)
+        ax_risk = fig.add_subplot(gs[2, 2:])
+        ax_risk.axis('off')
+        
+        volatility = self.calculator.calculate_volatility()
+        sortino = self.calculator.calculate_sortino_ratio()
+        calmar = self.calculator.calculate_calmar_ratio()
+        
+        risk_text = f"""
+RISK ANALYSIS
+
+Volatility: {volatility:.1f}%
+Sortino Ratio: {sortino:.2f}
+Calmar Ratio: {calmar:.2f}
+
+Max Drawdown: {max_dd:.1f}%
+Sharpe Ratio: {sharpe:.2f}
+        """
+        
+        ax_risk.text(0.1, 0.9, risk_text, transform=ax_risk.transAxes,
+                    fontsize=11, verticalalignment='top',
+                    bbox=dict(boxstyle='round,pad=0.5', facecolor='lightcoral', alpha=0.8))
+        
+        plt.suptitle('Portfolio Performance Dashboard', fontsize=18, fontweight='bold')
+        
+        if save_and_open:
+            filename = f"{self.charts_dir}/performance_dashboard.png"
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"📊 Performance dashboard saved: {filename}")
+            self.open_file_in_explorer(filename)
+            return filename
+        
+        return None
+    
+    def generate_all_charts(self, save_and_open: bool = True) -> List[str]:
+        """Generate all available charts."""
+        if not CHARTS_AVAILABLE:
+            print("❌ Chart generation not available. Please install required dependencies:")
+            print("   pip install matplotlib seaborn pandas numpy scipy")
+            return []
+        
+        generated_files = []
+        
+        print("\n🎨 Generating comprehensive analytics charts...")
+        
+        # Validate data before generating charts
+        if not self.calculator.equity_values:
+            print("❌ No equity data available for chart generation")
+            return []
+        
+        if len(self.calculator.equity_values) < 2:
+            print("❌ Insufficient equity data for meaningful charts (need at least 2 data points)")
+            return []
+        
+        # Generate all charts
+        charts = [
+            ("Equity Curve", self.create_equity_curve_chart),
+            ("Drawdown Analysis", self.create_drawdown_chart),
+            ("Returns Analysis", self.create_returns_analysis_chart),
+            ("Trade Analysis", self.create_trade_analysis_chart),
+            ("Risk Dashboard", self.create_risk_metrics_dashboard),
+            ("Performance Dashboard", self.create_performance_summary_dashboard)
+        ]
+        
+        for chart_name, chart_func in charts:
+            try:
+                print(f"  📈 Creating {chart_name}...")
+                filename = chart_func(save_and_open)
+                if filename and os.path.exists(filename):
+                    generated_files.append(filename)
+                    print(f"  ✅ {chart_name} created successfully")
+                else:
+                    print(f"  ⚠️ {chart_name} was not created (may be due to insufficient data)")
+            except Exception as e:
+                print(f"  ❌ Error creating {chart_name}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Clean up matplotlib resources
+        try:
+            plt.close('all')
+        except:
+            pass
+        
+        if generated_files:
+            print(f"\n✅ Generated {len(generated_files)} charts in '{self.charts_dir}' directory")
+            print("📁 Charts can be opened directly from file explorer")
+            print("\n📊 Generated charts:")
+            for filename in generated_files:
+                print(f"  • {os.path.basename(filename)}")
+        else:
+            print("\n⚠️ No charts were generated successfully")
+            print("💡 This may be due to insufficient data or missing dependencies")
+        
+        return generated_files
+
+
 def display_account_info(account: Dict) -> None:
     """Display account information."""
     print("=" * 60)
@@ -793,8 +1475,16 @@ def display_comprehensive_metrics(calculator: PerformanceCalculator) -> None:
 
 def main():
     """Main function to fetch and display trading information."""
-    print("🚀 Alpaca Paper Trading Information")
+    print("🚀 Alpaca Trading Analytics & Chart Generator")
     print(f"API Key: {ALPACA_API_KEY}")
+    
+    # Check for chart generation capability
+    if CHARTS_AVAILABLE:
+        print("📊 Advanced analytics charts enabled")
+    else:
+        print("⚠️  Basic mode - install chart dependencies for advanced analytics:")
+        print("   pip install matplotlib seaborn pandas numpy scipy")
+    
     print("Fetching data from Alpaca API...")
     
     # Get account information
@@ -812,8 +1502,9 @@ def main():
     
     # Get recent orders
     print("\nFetching recent orders...")
-    orders = get_orders(status="all", limit=20)
+    orders = get_orders(status="all", limit=MAX_ORDERS_TO_FETCH)
     if orders is not None:
+        print(f"📋 Found {len(orders)} total orders")
         display_recent_orders(orders)
     else:
         print("❌ Failed to fetch orders")
@@ -826,69 +1517,197 @@ def main():
     else:
         print("❌ Failed to fetch positions")
     
-    # Get portfolio history
+    # Get portfolio history - try extended periods for better analysis
     print("\nFetching portfolio performance...")
-    portfolio = get_portfolio_history("1D")
+    # Try different periods to get meaningful data
+    portfolio = None
+    for period in DEFAULT_ANALYSIS_PERIODS:
+        portfolio = get_portfolio_history(period)
+        if portfolio and portfolio.get('equity') and len(portfolio.get('equity', [])) > 1:
+            print(f"📊 Using {period} portfolio data ({len(portfolio.get('equity', []))} data points)")
+            break
+    
     if portfolio:
         display_portfolio_summary(portfolio)
     else:
         print("❌ Failed to fetch portfolio history")
     
-    # Get extended data for comprehensive analysis starting from April 11th
-    print("\nFetching extended data for comprehensive analysis from April 11th, 2024...")
-    extended_portfolio = get_portfolio_history_from_date("2024-04-11")
-    closed_orders = get_closed_orders_from_date("2024-04-11")
+    # Get extended data for comprehensive analysis
+    print("\nFetching extended data for comprehensive analysis...")
+    extended_portfolio = get_extended_portfolio_history()
+    
+    # Try to get maximum order history
+    print("🔍 Fetching maximum available order history...")
+    closed_orders = None
+    
+    # Strategy 1: Try to get all orders first (maximum history)
+    try:
+        print("  📋 Attempting to fetch all available orders...")
+        all_orders = get_closed_orders()
+        if all_orders and len(all_orders) > 0:
+            print(f"✅ Found {len(all_orders)} total orders")
+            closed_orders = all_orders
+    except Exception as e:
+        print(f"  ❌ Failed to fetch all orders: {e}")
+    
+    # Strategy 2: Try different time periods if needed
+    if not closed_orders or len(closed_orders) < 10:
+        print("🔍 Trying date-based order fetching for more history...")
+        for months_back in [12, 6, 3, 1]:  # Try 1 year first, then shorter periods
+            start_date = (datetime.now() - timedelta(days=months_back * 30)).strftime("%Y-%m-%d")
+            print(f"  📅 Trying {months_back} month(s) back ({start_date})...")
+            date_orders = get_closed_orders_from_date(start_date)
+            if date_orders and len(date_orders) > (len(closed_orders) if closed_orders else 0):
+                print(f"✅ Found {len(date_orders)} orders from {start_date}")
+                closed_orders = date_orders
+                break
     
     if extended_portfolio and account:
         try:
-            equity_data = extended_portfolio.get('equity', [])
-            print(f"📊 Analyzing {len(equity_data)} data points...")
+            print("\n🔍 Performing comprehensive performance analysis...")
             
-            # Debug: Show equity curve range
-            if equity_data:
-                print(f"🔍 Debug: Equity range ${equity_data[0]:,.2f} → ${equity_data[-1]:,.2f}")
-                print(f"🔍 Debug: Current account value: ${float(account.get('portfolio_value', 0)):,.2f}")
+            # Create performance calculator
+            calculator = PerformanceCalculator(
+                extended_portfolio, 
+                closed_orders if closed_orders else [], 
+                account
+            )
             
-            calculator = PerformanceCalculator(extended_portfolio, closed_orders or [], account)
+            # Display comprehensive metrics
             display_comprehensive_metrics(calculator)
-        except Exception as e:
-            print(f"❌ Error calculating performance metrics: {e}")
-            print("This might be due to insufficient trading history.")
             
-            # Try with basic portfolio data as fallback
-            print("\n🔄 Attempting basic analysis with available data...")
-            try:
-                if portfolio:
-                    basic_calculator = PerformanceCalculator(portfolio, closed_orders or [], account)
-                    display_comprehensive_metrics(basic_calculator)
+            # Generate charts if available
+            if CHARTS_AVAILABLE:
+                print("\n🎨 Generating analytics charts...")
+                chart_generator = ChartGenerator(calculator)
+                generated_files = chart_generator.generate_all_charts(save_and_open=True)
+                
+                if generated_files:
+                    print(f"\n✅ Successfully generated {len(generated_files)} charts:")
+                    for filename in generated_files:
+                        print(f"  📊 {filename}")
                 else:
-                    print("❌ No portfolio data available for analysis")
-            except Exception as e2:
-                print(f"❌ Basic analysis also failed: {e2}")
+                    print("⚠️ No charts were generated")
+            else:
+                print("\n📊 Chart generation skipped - dependencies not available")
+                
+        except Exception as e:
+            print(f"❌ Error during comprehensive analysis: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        print("❌ Insufficient data for comprehensive performance analysis")
-        print("📝 Note: Extended analysis requires historical trading data")
-        
-        # Try with basic data if available
-        if portfolio and account:
-            print("\n🔄 Attempting basic analysis with daily data...")
-            try:
-                basic_calculator = PerformanceCalculator(portfolio, closed_orders or [], account)
-                display_comprehensive_metrics(basic_calculator)
-            except Exception as e:
-                print(f"❌ Basic analysis failed: {e}")
+        print("⚠️ Insufficient data for comprehensive analysis")
+        if not extended_portfolio:
+            print("  • Could not fetch extended portfolio history")
+        if not account:
+            print("  • Could not fetch account information")
+
     
-    print("\n" + "=" * 60)
-    print("✅ Data fetch complete!")
-    print("=" * 60)
+    print("\n" + "=" * 80)
+    print("✅ ANALYSIS COMPLETE!")
+    print("=" * 80)
+    
+    if CHARTS_AVAILABLE:
+        print("📈 Analytics Summary:")
+        print("  • Comprehensive performance metrics calculated")
+        print("  • Professional charts generated and saved")
+        print("  • Charts automatically opened in default viewer")
+        print("  • Files saved in 'charts' directory for future reference")
+        print("\n💡 Tip: Charts are high-resolution PNG files suitable for presentations")
+    else:
+        print("📊 Install chart dependencies for visual analytics:")
+        print("  pip install matplotlib seaborn pandas numpy scipy")
+    
+    print("\n🎯 Next Steps:")
+    print("  • Review performance metrics and charts")
+    print("  • Analyze risk-adjusted returns")
+    print("  • Compare against benchmarks")
+    print("  • Consider portfolio adjustments based on insights")
+
+
+def test_chart_generation():
+    """Test chart generation with sample data."""
+    if not CHARTS_AVAILABLE:
+        print("❌ Chart dependencies not available")
+        print("📦 Install with: pip install matplotlib seaborn pandas numpy scipy")
+        return False
+    
+    print("🧪 Testing chart generation with sample data...")
+    
+    try:
+        # Create sample data
+        import random
+        random.seed(42)  # For reproducible results
+        
+        dates = [datetime.now() - timedelta(days=i) for i in range(100, 0, -1)]
+        equity_values = []
+        current_value = 10000
+        
+        for _ in range(100):
+            change = random.uniform(-0.02, 0.02)  # ±2% daily change
+            current_value *= (1 + change)
+            equity_values.append(current_value)
+        
+        print(f"📊 Generated sample data: {len(equity_values)} data points")
+        print(f"📈 Value range: ${equity_values[0]:,.2f} → ${equity_values[-1]:,.2f}")
+        
+        # Create sample portfolio history
+        sample_portfolio = {
+            'equity': equity_values,
+            'timestamp': [int(d.timestamp()) for d in dates]
+        }
+        
+        # Create sample account
+        sample_account = {
+            'equity': str(equity_values[-1]),
+            'cash': '5000',
+            'portfolio_value': str(equity_values[-1])
+        }
+        
+        # Create sample orders
+        sample_orders = []
+        
+        print("🔧 Creating performance calculator...")
+        calculator = PerformanceCalculator(sample_portfolio, sample_orders, sample_account)
+        
+        print("🎨 Creating chart generator...")
+        chart_generator = ChartGenerator(calculator)
+        
+        # Test all chart generation
+        print("📈 Testing all chart generation...")
+        print(f"🔍 Calculator has {len(calculator.equity_values)} equity values")
+        print(f"🔍 Calculator has {len(calculator.dates)} dates")
+        
+        generated_files = chart_generator.generate_all_charts(save_and_open=True)
+        
+        if generated_files:
+            print(f"✅ Chart generation test passed: {len(generated_files)} charts created")
+            for filename in generated_files:
+                print(f"  📊 {os.path.basename(filename)}")
+            return True
+        else:
+            print("❌ Chart generation test failed - no charts created")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Chart generation test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 if __name__ == "__main__":
     try:
-        main()
+        # Check if user wants to test chart generation
+        if len(sys.argv) > 1 and sys.argv[1] == "--test-charts":
+            test_chart_generation()
+        else:
+            main()
     except KeyboardInterrupt:
         print("\n\n👋 Script interrupted by user")
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
