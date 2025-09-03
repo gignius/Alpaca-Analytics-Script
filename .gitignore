@@ -48,6 +48,7 @@ config.py
 secrets.py
 *_config.py
 api_keys.txt
+api_keys.py
 
 # Trading data exports
 *.csv

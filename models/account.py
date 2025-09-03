@@ -38,6 +38,7 @@ class OrderStatus(Enum):
     REJECTED = "rejected"
     SUSPENDED = "suspended"
     CALCULATED = "calculated"
+    HELD = "held"
 
 @dataclass
 class AccountInfo:
@@ -80,9 +81,9 @@ class AccountInfo:
                 equity=Decimal(str(data['equity'])),
                 last_equity=Decimal(str(data['last_equity'])),
                 multiplier=str(data['multiplier']),
-                day_trade_count=int(data['day_trade_count']),
+                day_trade_count=int(data['daytrade_count']),
                 pattern_day_trader=bool(data['pattern_day_trader']),
-                trading_blocked=bool(data['trade_suspended_by_user']),
+                trading_blocked=bool(data.get('trading_blocked', False)),
                 transfers_blocked=bool(data.get('transfers_blocked', False)),
                 account_blocked=bool(data.get('account_blocked', False)),
                 created_at=datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')),

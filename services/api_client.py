@@ -12,8 +12,9 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import os
 from contextlib import contextmanager
+from datetime import datetime
 
-from ..models import AccountInfo, Position, Order, PortfolioHistory
+from models import AccountInfo, Position, Order, PortfolioHistory
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +60,25 @@ class SecureAlpacaClient:
         self.api_key = os.getenv('ALPACA_API_KEY')
         self.secret_key = os.getenv('ALPACA_SECRET_KEY')
         
+        if self.api_key and self.secret_key:
+            environment_type = "PAPER TRADING" if self.environment == Environment.PAPER else "LIVE TRADING"
+            logger.warning(f"Using {environment_type} API keys from environment variables")
+            logger.debug(f"API Key from env: {self.api_key[:8]}..." if self.api_key else "None")
+        
         if not self.api_key or not self.secret_key:
             # Fallback to config file (less secure)
             try:
-                from ..config import ALPACA_API_KEY, ALPACA_SECRET_KEY
-                self.api_key = ALPACA_API_KEY
-                self.secret_key = ALPACA_SECRET_KEY
-                logger.warning("Using API keys from config file - consider using environment variables")
+                import api_keys
+                logger.debug(f"API keys imported successfully")
+                api_key = getattr(api_keys, 'ALPACA_API_KEY', None)
+                secret_key = getattr(api_keys, 'ALPACA_SECRET_KEY', None)
+                logger.debug(f"Config API key: {api_key[:8] if api_key else 'None'}...")
+                logger.debug(f"Config secret key: {secret_key[:8] if secret_key else 'None'}...")
+                self.api_key = api_key
+                self.secret_key = secret_key
+                environment_type = "PAPER TRADING" if self.environment == Environment.PAPER else "LIVE TRADING"
+                logger.warning(f"Using {environment_type} API keys from config file - consider using environment variables")
+                logger.debug(f"Final API Key: {self.api_key[:8]}..." if self.api_key else "None")
             except ImportError:
                 raise AlpacaAPIError("No API keys found. Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables.")
         
@@ -129,7 +142,8 @@ class SecureAlpacaClient:
             if response.status_code == 401:
                 raise AlpacaAPIError("Unauthorized - check your API keys", 401)
             elif response.status_code == 403:
-                raise AlpacaAPIError("Forbidden - insufficient permissions", 403)
+                environment_type = "PAPER TRADING" if self.environment == Environment.PAPER else "LIVE TRADING"
+                raise AlpacaAPIError(f"Forbidden - insufficient permissions (using {environment_type} keys)", 403)
             elif response.status_code == 429:
                 raise AlpacaAPIError("Rate limit exceeded - please wait", 429)
             
@@ -143,11 +157,19 @@ class SecureAlpacaClient:
     
     def get_account(self) -> AccountInfo:
         """Get account information with validation."""
+        # Paper trading may have different account endpoint behavior
+        if self.environment == Environment.PAPER:
+            logger.info("Accessing paper trading account information")
+        
         data = self._make_request('GET', '/v2/account')
         return AccountInfo.from_api_response(data)
     
     def get_positions(self) -> List[Position]:
         """Get current positions with validation."""
+        # Paper trading accounts may start with no positions
+        if self.environment == Environment.PAPER:
+            logger.info("Fetching paper trading positions")
+        
         data = self._make_request('GET', '/v2/positions')
         return [Position.from_api_response(pos) for pos in data]
     
@@ -178,20 +200,40 @@ class SecureAlpacaClient:
         }
         
         try:
+            if self.environment == Environment.PAPER:
+                logger.info(f"Fetching paper trading portfolio history for period: {period}")
+            
             data = self._make_request('GET', '/v2/account/portfolio/history', params=params)
             return PortfolioHistory.from_api_response(data)
         except AlpacaAPIError as e:
             if e.status_code == 422:
-                logger.warning(f"Portfolio history not available for period {period}")
+                if self.environment == Environment.PAPER:
+                    logger.warning(f"Paper trading portfolio history not available for period {period} - may need trading activity first")
+                else:
+                    logger.warning(f"Portfolio history not available for period {period}")
                 return None
             raise
     
     def test_connection(self) -> bool:
         """Test API connection."""
         try:
+            if self.environment == Environment.PAPER:
+                logger.info("Testing paper trading API connection...")
+            else:
+                logger.info("Testing live trading API connection...")
+            
             self.get_account()
+            
+            if self.environment == Environment.PAPER:
+                logger.info("Paper trading API connection successful")
+            
             return True
-        except AlpacaAPIError:
+        except AlpacaAPIError as e:
+            if self.environment == Environment.PAPER:
+                logger.error(f"Paper trading connection test failed: {e}")
+                logger.info("Note: Paper trading accounts may require specific setup in Alpaca dashboard")
+            else:
+                logger.error(f"Live trading connection test failed: {e}")
             return False
     
     def close(self):

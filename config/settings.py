@@ -56,8 +56,8 @@ class SecureConfig:
         if not api_key:
             # Fallback to config file (less secure)
             try:
-                from ..config import ALPACA_API_KEY
-                api_key = ALPACA_API_KEY
+                import config
+                api_key = getattr(config, 'ALPACA_API_KEY', None)
             except ImportError:
                 raise ValueError("ALPACA_API_KEY not found in environment variables or config file")
         
@@ -71,8 +71,8 @@ class SecureConfig:
         if not secret_key:
             # Fallback to config file (less secure)
             try:
-                from ..config import ALPACA_SECRET_KEY
-                secret_key = ALPACA_SECRET_KEY
+                import config
+                secret_key = getattr(config, 'ALPACA_SECRET_KEY', None)
             except ImportError:
                 raise ValueError("ALPACA_SECRET_KEY not found in environment variables or config file")
         
